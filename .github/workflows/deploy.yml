@@ -3,12 +3,25 @@ name: CI/CD
 on:
   push:
     branches: [main]
+  workflow_dispatch:          # adds a manual "Run workflow" button
+
+concurrency:
+  group: deploy-production    # never run two deploys at once
+  cancel-in-progress: true
+
+env:
+  IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/my-site
+  CONTAINER: my-site
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
@@ -21,7 +34,11 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/my-site:latest
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   deploy:
     needs: build-and-push
@@ -33,7 +50,15 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
+          script_stop: true
           script: |
-            docker pull ${{ secrets.DOCKERHUB_USERNAME }}/my-site:latest
-            docker rm -f my-site || true
-            docker run -d --name my-site -p 80:80 ${{ secrets.DOCKERHUB_USERNAME }}/my-site:latest
+            docker pull ${{ env.IMAGE }}:${{ github.sha }}
+            docker rm -f ${{ env.CONTAINER }} || true
+            docker run -d \
+              --name ${{ env.CONTAINER }} \
+              --restart unless-stopped \
+              -p 80:80 \
+              ${{ env.IMAGE }}:${{ github.sha }}
+            docker image prune -f
+            sleep 3
+            curl -fsS http://localhost > /dev/null && echo "Site is up"
